@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, toRaw } from 'vue';
 import { SettingOutlined } from '@ant-design/icons-vue';
 import { executeAvatarBehaviorFromReply } from './ai/avatarBehaviorRules.js';
-import { createStreamAssistantVoice, stopAssistantVoice, stripTextForTts } from './utils/tts/assistantVoice.js';
+import { speakBrowserTts, stopBrowserTts, stripTextForTts } from './utils/tts/speechSynthesisTts.js';
 import AvatarStage3D from './components/AvatarStage3D.vue';
 import ChatDock from './components/ChatDock.vue';
 import ModelCenter from './components/ModelCenter.vue';
@@ -49,12 +49,9 @@ const connectionStatus = ref('online');
 const avatarStageRef = ref(null);
 /** 流式是否已出字（口型/状态） */
 const streamOutputStarted = ref(false);
-const speechHoldActive = ref(false);
 const activeStreamRequestId = ref('');
 const activePrompt = ref('');
 const lastStoppedPrompt = ref('');
-/** 口播与舞台字幕同步时的纯文本前缀（null 表示用完整助手原文） */
-const avatarVoiceStageText = ref(null);
 
 const messages = ref([]);
 /** 是否展开左侧「实时对话」消息列表，默认收起步以 3D 字幕为主 */
@@ -163,9 +160,7 @@ function createStreamRequestId() {
 }
 
 function stopMessage() {
-  stopAssistantVoice();
-  speechHoldActive.value = false;
-  avatarVoiceStageText.value = null;
+  stopBrowserTts();
   const llmAPI = globalThis.window?.electronAPI?.llm;
   if (!llmAPI || !activeStreamRequestId.value) {
     return;
@@ -196,9 +191,7 @@ async function submitMessage(inputPrompt = '') {
   }
   chatBusy.value = true;
   streamOutputStarted.value = false;
-  speechHoldActive.value = false;
-  stopAssistantVoice();
-  avatarVoiceStageText.value = null;
+  stopBrowserTts();
   connectionStatus.value = 'thinking';
   activePrompt.value = prompt;
   lastStoppedPrompt.value = '';
@@ -208,25 +201,11 @@ async function submitMessage(inputPrompt = '') {
   const requestId = createStreamRequestId();
   activeStreamRequestId.value = requestId;
 
-  const getAssistantStripPlain = () => stripTextForTts(messages.value[assistantIndex]?.text ?? '');
-  const streamVoice = createStreamAssistantVoice({
-    getPlain: getAssistantStripPlain,
-    setSpeechHold: (v) => {
-      speechHoldActive.value = v;
-    },
-    setDisplayEnd: (n) => {
-      if (n == null) {
-        avatarVoiceStageText.value = null;
-        return;
-      }
-      const p = getAssistantStripPlain();
-      avatarVoiceStageText.value = p.slice(0, n);
-    },
-  });
-
   try {
     let result;
+    let usedChatStream = false;
     if (typeof llmAPI.chatStream === 'function') {
+      usedChatStream = true;
       result = await llmAPI.chatStream(prompt, { requestId }, {
         onChunk: (chunk) => {
           if (typeof chunk === 'string' && chunk) {
@@ -234,8 +213,7 @@ async function submitMessage(inputPrompt = '') {
             const row = messages.value[assistantIndex];
             if (row?.role === 'assistant') {
               row.text += chunk;
-              const plain = stripTextForTts(row.text);
-              streamVoice.ingest(plain, false);
+              void speakBrowserTts(stripTextForTts(row.text));
             }
           }
         },
@@ -257,15 +235,14 @@ async function submitMessage(inputPrompt = '') {
     if (row?.role === 'assistant') {
       row.text = content || '模型未返回文本内容。';
     }
-    const finalStrip = stripTextForTts(row.text);
-    streamVoice.ingest(finalStrip, true);
+    if (!usedChatStream) {
+      void speakBrowserTts(stripTextForTts(row.text));
+    }
     executeAvatarBehaviorFromReply({ avatar: avatarStageRef.value, text: content });
     connectionStatus.value = 'online';
     llmStatus.value = '';
   } catch (error) {
-    stopAssistantVoice();
-    speechHoldActive.value = false;
-    avatarVoiceStageText.value = null;
+    stopBrowserTts();
     const row = messages.value[assistantIndex];
     if (error instanceof Error && error.name === 'AbortError') {
       if (row?.role === 'assistant' && !row.text.trim()) {
@@ -325,9 +302,6 @@ const currentModelName = computed(() => {
 });
 
 const stageAvatarStatus = computed(() => {
-  if (speechHoldActive.value && !chatBusy.value) {
-    return 'speaking';
-  }
   if (!chatBusy.value) {
     return 'idle';
   }
@@ -347,17 +321,6 @@ const avatarSubtitleText = computed(() => {
     }
   }
   return '';
-});
-
-/** 有口播同步则跟读；流式中未开读则舞台不显示；否则最近一条助手原文 */
-const avatarStageSubtitleText = computed(() => {
-  if (chatBusy.value && avatarVoiceStageText.value == null) {
-    return '';
-  }
-  if (avatarVoiceStageText.value != null) {
-    return avatarVoiceStageText.value;
-  }
-  return avatarSubtitleText.value;
 });
 
 onMounted(() => {
@@ -399,8 +362,7 @@ onMounted(() => {
               ref="avatarStageRef"
               model-url="/models/avatar.vrm"
               :avatar-status="stageAvatarStatus"
-              :subtitle-text="avatarStageSubtitleText"
-              :subtitle-voice-active="avatarVoiceStageText != null"
+              :subtitle-text="avatarSubtitleText"
             />
           </a-card>
         </div>
