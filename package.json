@@ -1,0 +1,54 @@
+{
+  "name": "omni-mate",
+  "version": "0.1.0",
+  "description": "Electron + Vue 3 desktop application",
+  "main": "dist-electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build && electron-builder",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.5.2",
+    "@vitejs/plugin-vue": "latest",
+    "ant-design-vue": "^4.2.6",
+    "concurrently": "latest",
+    "cross-env": "latest",
+    "dompurify": "^3.4.1",
+    "esbuild": "^0.28.0",
+    "markdown-it": "^14.1.1",
+    "openai": "^6.34.0",
+    "three": "^0.184.0",
+    "vite": "latest",
+    "vite-plugin-electron": "latest",
+    "vite-plugin-electron-renderer": "latest",
+    "vue": "latest",
+    "wait-on": "latest"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest"
+  },
+  "build": {
+    "appId": "com.omnimate.app",
+    "productName": "Omni Mate",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
