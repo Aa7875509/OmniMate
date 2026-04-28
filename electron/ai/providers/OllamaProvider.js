@@ -2,7 +2,7 @@ import { LLMProvider } from '../LLMProvider.js';
 
 /** 与 App.vue 默认 Ollama 配置保持一致 */
 // const DEFAULT_OLLAMA_MODEL = 'llama3.2:3b';
-const DEFAULT_OLLAMA_MODEL = 'gemma4:e2b';
+const DEFAULT_OLLAMA_MODEL = 'gemma4:e4b';
 
 
 export class OllamaProvider extends LLMProvider {

@@ -1,8 +1,13 @@
 <script setup>
-import { computed, onMounted, ref, toRaw } from 'vue';
+import { computed, onMounted, onUnmounted, ref, toRaw } from 'vue';
 import { SettingOutlined } from '@ant-design/icons-vue';
 import { executeAvatarBehaviorFromReply } from './ai/avatarBehaviorRules.js';
-import { speakBrowserTts, stopBrowserTts, stripTextForTts } from './utils/tts/speechSynthesisTts.js';
+import {
+  beginMicCapture,
+  finalizeRecordingSession,
+} from './utils/stt/voiceRecordingSession.js';
+import { blobToPcm16kMono } from './utils/stt/blobToPcm16kMono.js';
+import { feedStreamTts, stopStreamTts } from './utils/tts/speechSynthesisTts.js';
 import AvatarStage3D from './components/AvatarStage3D.vue';
 import ChatDock from './components/ChatDock.vue';
 import ModelCenter from './components/ModelCenter.vue';
@@ -18,7 +23,12 @@ const DEFAULT_OPENAI_CONFIG = {
 };
 const DEFAULT_OLLAMA_CONFIG = {
   baseURL: 'http://127.0.0.1:11434',
-  model: 'gemma4:e2b',
+  model: 'gemma4:e4b',
+};
+const DEFAULT_XFYUN_CONFIG = {
+  appId: '',
+  apiKey: '',
+  apiSecret: '',
 };
 
 const modelSlot = {
@@ -41,21 +51,26 @@ const openaiConfig = ref({
 const ollamaConfig = ref({
   ...DEFAULT_OLLAMA_CONFIG,
 });
+/** 讯飞语音听写（主进程 WebSocket，密钥仅存本地 userData） */
+const xfyunConfig = ref({
+  ...DEFAULT_XFYUN_CONFIG,
+});
 const llmStatus = ref('');
 const llmBusy = ref(false);
 const chatBusy = ref(false);
 const themeColor = ref(DEFAULT_THEME_COLOR);
 const connectionStatus = ref('online');
 const avatarStageRef = ref(null);
-/** 流式是否已出字（口型/状态） */
-const streamOutputStarted = ref(false);
+/** 浏览器 TTS 是否在真实播报（与 3D 嘴型「说话」同步） */
+const ttsSpeaking = ref(false);
+/** 当前一段录音会话（来自 voiceRecordingSession） */
+const micSessionRef = ref(null);
+const isVoiceListening = computed(() => Boolean(micSessionRef.value));
 const activeStreamRequestId = ref('');
 const activePrompt = ref('');
 const lastStoppedPrompt = ref('');
 
 const messages = ref([]);
-/** 是否展开左侧「实时对话」消息列表，默认收起步以 3D 字幕为主 */
-const chatDialogExpanded = ref(false);
 let messageSeed = 0;
 
 function createMessage(role, text) {
@@ -92,11 +107,29 @@ function closeModelCenter() {
   isModelCenterOpen.value = false;
 }
 
+async function syncXFyunConfig() {
+  const xf = globalThis.window?.electronAPI?.xfyun;
+  if (!xf?.getConfig) {
+    return;
+  }
+  try {
+    const c = await xf.getConfig();
+    xfyunConfig.value = {
+      appId: typeof c.appId === 'string' ? c.appId : '',
+      apiKey: typeof c.apiKey === 'string' ? c.apiKey : '',
+      apiSecret: typeof c.apiSecret === 'string' ? c.apiSecret : '',
+    };
+  } catch {
+    /* noop */
+  }
+}
+
 async function refreshProviders() {
   const llmAPI = globalThis.window?.electronAPI?.llm;
 
   if (!llmAPI) {
     llmStatus.value = '当前环境未连接 Electron 主进程。';
+    await syncXFyunConfig();
     return;
   }
 
@@ -113,6 +146,7 @@ async function refreshProviders() {
   } catch (error) {
     llmStatus.value = `刷新失败：${error instanceof Error ? error.message : String(error)}`;
   }
+  await syncXFyunConfig();
 }
 
 function toPlainLlmConfig(config) {
@@ -152,15 +186,41 @@ function resetLLMSettings() {
   openaiConfig.value = { ...DEFAULT_OPENAI_CONFIG };
   ollamaConfig.value = { ...DEFAULT_OLLAMA_CONFIG };
   themeColor.value = DEFAULT_THEME_COLOR;
-  llmStatus.value = '已恢复默认配置，请点击“保存并切换”生效。';
+  llmStatus.value = '已恢复默认配置，请点击“保存并切换”生效。（讯飞配置未改动）';
+}
+
+async function applyXFyunSettings() {
+  const xf = globalThis.window?.electronAPI?.xfyun;
+  if (!xf?.saveConfig) {
+    llmStatus.value = '当前环境未连接 Electron，无法保存讯飞配置。';
+    return;
+  }
+  llmBusy.value = true;
+  try {
+    await xf.saveConfig({
+      appId: String(xfyunConfig.value.appId ?? '').trim(),
+      apiKey: String(xfyunConfig.value.apiKey ?? '').trim(),
+      apiSecret: String(xfyunConfig.value.apiSecret ?? '').trim(),
+    });
+    await syncXFyunConfig();
+    llmStatus.value = '讯飞语音听写配置已保存。';
+  } catch (error) {
+    llmStatus.value = `讯飞配置保存失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    llmBusy.value = false;
+  }
 }
 
 function createStreamRequestId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function onStreamTtsSpeakingChange(speaking) {
+  ttsSpeaking.value = speaking;
+}
+
 function stopMessage() {
-  stopBrowserTts();
+  stopStreamTts();
   const llmAPI = globalThis.window?.electronAPI?.llm;
   if (!llmAPI || !activeStreamRequestId.value) {
     return;
@@ -185,13 +245,14 @@ async function submitMessage(inputPrompt = '') {
     return;
   }
 
+  stopVoiceInput();
+
   messages.value.push(createMessage('user', prompt));
   if (!hasCustomPrompt) {
     draftMessage.value = '';
   }
   chatBusy.value = true;
-  streamOutputStarted.value = false;
-  stopBrowserTts();
+  stopStreamTts();
   connectionStatus.value = 'thinking';
   activePrompt.value = prompt;
   lastStoppedPrompt.value = '';
@@ -203,17 +264,17 @@ async function submitMessage(inputPrompt = '') {
 
   try {
     let result;
-    let usedChatStream = false;
     if (typeof llmAPI.chatStream === 'function') {
-      usedChatStream = true;
       result = await llmAPI.chatStream(prompt, { requestId }, {
         onChunk: (chunk) => {
           if (typeof chunk === 'string' && chunk) {
-            streamOutputStarted.value = true;
             const row = messages.value[assistantIndex];
             if (row?.role === 'assistant') {
               row.text += chunk;
-              void speakBrowserTts(stripTextForTts(row.text));
+              feedStreamTts(row.text, {
+                endOfStream: false,
+                onSpeakingChange: onStreamTtsSpeakingChange,
+              });
             }
           }
         },
@@ -224,9 +285,6 @@ async function submitMessage(inputPrompt = '') {
       const row = messages.value[assistantIndex];
       if (row?.role === 'assistant') {
         row.text = fallbackContent;
-        if (fallbackContent) {
-          streamOutputStarted.value = true;
-        }
       }
     }
 
@@ -235,14 +293,12 @@ async function submitMessage(inputPrompt = '') {
     if (row?.role === 'assistant') {
       row.text = content || '模型未返回文本内容。';
     }
-    if (!usedChatStream) {
-      void speakBrowserTts(stripTextForTts(row.text));
-    }
+    feedStreamTts(row.text, { endOfStream: true, onSpeakingChange: onStreamTtsSpeakingChange });
     executeAvatarBehaviorFromReply({ avatar: avatarStageRef.value, text: content });
     connectionStatus.value = 'online';
     llmStatus.value = '';
   } catch (error) {
-    stopBrowserTts();
+    stopStreamTts();
     const row = messages.value[assistantIndex];
     if (error instanceof Error && error.name === 'AbortError') {
       if (row?.role === 'assistant' && !row.text.trim()) {
@@ -262,7 +318,6 @@ async function submitMessage(inputPrompt = '') {
   } finally {
     activeStreamRequestId.value = '';
     activePrompt.value = '';
-    streamOutputStarted.value = false;
     chatBusy.value = false;
   }
 }
@@ -272,6 +327,68 @@ function retryLastStoppedMessage() {
     return;
   }
   submitMessage(lastStoppedPrompt.value);
+}
+
+function stopVoiceInput() {
+  const mic = micSessionRef.value;
+  if (mic) {
+    micSessionRef.value = null;
+    mic.stop().catch(() => {});
+  }
+}
+
+async function toggleVoiceInput() {
+  if (chatBusy.value) {
+    return;
+  }
+
+  if (micSessionRef.value) {
+    const session = micSessionRef.value;
+    micSessionRef.value = null;
+    try {
+      const { blob, ok } = await finalizeRecordingSession(session);
+      if (!ok) {
+        llmStatus.value = '录音过短，请说话后再结束。';
+        return;
+      }
+      const kb = Math.max(1, Math.round(blob.size / 1024));
+      const xfApi = globalThis.window?.electronAPI?.xfyun;
+      if (xfApi?.transcribePcm) {
+        llmStatus.value = '正在讯飞听写转文字…';
+        try {
+          const pcm = await blobToPcm16kMono(blob);
+          const u8 = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+          const result = await xfApi.transcribePcm(u8);
+          const text = typeof result?.text === 'string' ? result.text.trim() : '';
+          if (text) {
+            const prev = draftMessage.value.trim();
+            draftMessage.value = prev ? `${prev} ${text}` : text;
+            llmStatus.value = `讯飞转写完成（约 ${kb} KB）。`;
+          } else {
+            llmStatus.value = `未识别到文本（约 ${kb} KB）。请检查麦克风或讯飞控制台权限。`;
+          }
+        } catch (err) {
+          llmStatus.value = `讯飞转写失败：${err instanceof Error ? err.message : String(err)}`;
+        }
+      } else {
+        llmStatus.value = `录音已保存（约 ${kb} KB）。浏览器预览未接入讯飞，请使用 Electron 应用并配置开放平台密钥。`;
+      }
+    } catch (error) {
+      llmStatus.value = `结束录音失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+    return;
+  }
+
+  try {
+    const session = await beginMicCapture();
+    micSessionRef.value = session;
+    llmStatus.value = globalThis.window?.electronAPI?.xfyun
+      ? '录制中…结束录音后将通过讯飞转为文字（需在设置中填写密钥）。'
+      : '录制中…再次点击结束录音。';
+  } catch (error) {
+    micSessionRef.value = null;
+    llmStatus.value = `无法开启麦克风：${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 const statusLabel = computed(() => {
@@ -302,30 +419,22 @@ const currentModelName = computed(() => {
 });
 
 const stageAvatarStatus = computed(() => {
-  if (!chatBusy.value) {
-    return 'idle';
-  }
-  if (streamOutputStarted.value) {
+  if (ttsSpeaking.value) {
     return 'speaking';
   }
-  return 'thinking';
-});
-
-/** 3D 舞台字幕：取最近一条助手回复（含流式累加中的文案） */
-const avatarSubtitleText = computed(() => {
-  const list = messages.value;
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const m = list[i];
-    if (m?.role === 'assistant') {
-      return typeof m.text === 'string' ? m.text : '';
-    }
+  if (chatBusy.value) {
+    return 'thinking';
   }
-  return '';
+  return 'idle';
 });
 
 onMounted(() => {
   refreshProviders();
   syncContextMessages();
+});
+
+onUnmounted(() => {
+  stopVoiceInput();
 });
 </script>
 
@@ -353,31 +462,27 @@ onMounted(() => {
       </a-layout-header>
 
       <a-layout-content class="main-content">
-        <div
-          class="avatar-stage"
-          :class="{ 'avatar-stage--with-chat': chatDialogExpanded }"
-        >
+        <div class="avatar-stage">
           <a-card class="avatar-card" :bordered="false">
             <AvatarStage3D
               ref="avatarStageRef"
               model-url="/models/avatar.vrm"
               :avatar-status="stageAvatarStatus"
-              :subtitle-text="avatarSubtitleText"
             />
           </a-card>
         </div>
 
         <ChatDock
-          :dialog-expanded="chatDialogExpanded"
           :messages="messages"
           :draft-message="draftMessage"
           :chat-busy="chatBusy"
+          :voice-listening="isVoiceListening"
           :can-retry="Boolean(lastStoppedPrompt) && !chatBusy"
-          @update:dialog-expanded="chatDialogExpanded = $event"
           @update:draft-message="draftMessage = $event"
           @submit-message="submitMessage"
           @stop-message="stopMessage"
           @retry-message="retryLastStoppedMessage"
+          @voice-click="toggleVoiceInput"
         />
       </a-layout-content>
     </a-layout>
@@ -389,6 +494,7 @@ onMounted(() => {
       :provider-options="providerOptions"
       :openai-config="openaiConfig"
       :ollama-config="ollamaConfig"
+      :xfyun-config="xfyunConfig"
       :theme-color="themeColor"
       :llm-status="llmStatus"
       :llm-busy="llmBusy"
@@ -396,8 +502,10 @@ onMounted(() => {
       @update:llm-provider="llmProvider = $event"
       @update:openai-config="openaiConfig = $event"
       @update:ollama-config="ollamaConfig = $event"
+      @update:xfyun-config="xfyunConfig = $event"
       @update:theme-color="themeColor = $event"
       @apply-llm-settings="applyLLMSettings"
+      @apply-xfyun-settings="applyXFyunSettings"
       @refresh-providers="refreshProviders"
       @reset-llm-settings="resetLLMSettings"
     />
@@ -445,20 +553,17 @@ onMounted(() => {
   height: calc(100vh - 78px);
   padding: 14px 16px 16px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: stretch;
   gap: 12px;
+  min-height: 0;
   overflow: hidden;
 }
 
 .avatar-stage {
-  flex: 1;
-  min-height: 220px;
-  padding-left: 0;
-  transition: padding-left 0.2s ease;
-}
-
-.avatar-stage--with-chat {
-  padding-left: min(390px, 32vw);
+  flex: 1 1 55%;
+  min-width: 0;
+  min-height: 200px;
 }
 
 .avatar-card {
@@ -478,12 +583,13 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
-  .avatar-stage {
-    min-height: 180px;
+  .main-content {
+    flex-direction: column;
   }
 
-  .avatar-stage--with-chat {
-    padding-left: 0;
+  .avatar-stage {
+    flex: 1 1 auto;
+    min-height: 160px;
   }
 }
 </style>

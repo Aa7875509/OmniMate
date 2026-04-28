@@ -85,6 +85,11 @@ const electronAPI = {
     clearContext: () => ipcRenderer.invoke('llm:clear-context'),
     setContextWindow: (maxMessages) => ipcRenderer.invoke('llm:set-context-window', maxMessages),
   },
+  xfyun: {
+    getConfig: () => ipcRenderer.invoke('xfyun:get-config'),
+    saveConfig: (config = {}) => ipcRenderer.invoke('xfyun:save-config', cloneForIpc(config)),
+    transcribePcm: (pcm) => ipcRenderer.invoke('xfyun:transcribe-pcm', pcm),
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

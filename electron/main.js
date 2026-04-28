@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LLMService } from './ai/LLMService.js';
+import { transcribePcm16k } from './xfyun/xfyunIat.js';
+import { loadXfyunConfig, saveXfyunConfig } from './xfyun/xfyunConfigStore.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -97,6 +99,30 @@ app.whenReady().then(() => {
   ipcMain.handle('llm:set-context-window', (_event, maxMessages) =>
     llmService.setContextWindow(maxMessages),
   );
+
+  const userDataPath = () => app.getPath('userData');
+
+  ipcMain.handle('xfyun:get-config', async () => loadXfyunConfig(userDataPath()));
+  ipcMain.handle('xfyun:save-config', async (_event, config = {}) =>
+    saveXfyunConfig(userDataPath(), config),
+  );
+  ipcMain.handle('xfyun:transcribe-pcm', async (_event, payload) => {
+    const cfg = await loadXfyunConfig(userDataPath());
+    let buf;
+    if (payload instanceof Uint8Array) {
+      buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+    } else if (payload instanceof ArrayBuffer) {
+      buf = Buffer.from(payload);
+    } else {
+      buf = Buffer.from(payload ?? []);
+    }
+    return transcribePcm16k({
+      appId: cfg.appId,
+      apiKey: cfg.apiKey,
+      apiSecret: cfg.apiSecret,
+      pcm: buf,
+    });
+  });
 
   createWindow();
 

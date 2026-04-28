@@ -48,7 +48,7 @@ export class LocalOllamaModel extends BaseChatModel {
 
     this.config = {
       baseURL: config.baseURL ?? 'http://127.0.0.1:11434',
-      model: config.model ?? 'gemma4:e2b', //gemma4:e2b，gemma4:e2b
+      model: config.model ?? 'gemma4:e4b', //gemma4:e4b，gemma4:e4b
     };
   }
 

@@ -70,6 +70,11 @@ var electronAPI = {
 		getContext: () => electron.ipcRenderer.invoke("llm:get-context"),
 		clearContext: () => electron.ipcRenderer.invoke("llm:clear-context"),
 		setContextWindow: (maxMessages) => electron.ipcRenderer.invoke("llm:set-context-window", maxMessages)
+	},
+	xfyun: {
+		getConfig: () => electron.ipcRenderer.invoke("xfyun:get-config"),
+		saveConfig: (config = {}) => electron.ipcRenderer.invoke("xfyun:save-config", cloneForIpc(config)),
+		transcribePcm: (pcm) => electron.ipcRenderer.invoke("xfyun:transcribe-pcm", pcm)
 	}
 };
 electron.contextBridge.exposeInMainWorld("electronAPI", electronAPI);

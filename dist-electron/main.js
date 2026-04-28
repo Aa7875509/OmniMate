@@ -1,6 +1,9 @@
 import { BrowserWindow, app, ipcMain, shell } from "electron";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
+import WebSocket from "ws";
+import { readFile, writeFile } from "node:fs/promises";
 //#region electron/ai/ContextManager.js
 var ContextManager = class {
 	constructor({ maxMessages = 12 } = {}) {
@@ -224,7 +227,7 @@ var OpenAIProvider = class extends LLMProvider {
 //#endregion
 //#region electron/ai/providers/OllamaProvider.js
 /** 与 App.vue 默认 Ollama 配置保持一致 */
-var DEFAULT_OLLAMA_MODEL = "gemma4:e2b";
+var DEFAULT_OLLAMA_MODEL = "gemma4:e4b";
 var OllamaProvider = class extends LLMProvider {
 	get id() {
 		return "ollama";
@@ -417,6 +420,196 @@ var LLMService = class {
 	}
 };
 //#endregion
+//#region electron/xfyun/xfyunIat.js
+/**
+* 讯飞语音听写（流式 WebSocket），鉴权与帧格式见官方 demo：
+* https://www.xfyun.cn/doc/asr/voicedictation/API.html
+*/
+var HOST = "iat-api.xfyun.cn";
+var HOST_URL = `wss://${HOST}/v2/iat`;
+var URI = "/v2/iat";
+var FRAME = {
+	FIRST: 0,
+	CONTINUE: 1,
+	LAST: 2
+};
+function buildAuthorization(apiKey, apiSecret, date) {
+	const signatureOrigin = `host: ${HOST}\ndate: ${date}\nGET ${URI} HTTP/1.1`;
+	const authorizationOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${crypto.createHmac("sha256", apiSecret).update(signatureOrigin).digest("base64")}"`;
+	return Buffer.from(authorizationOrigin, "utf8").toString("base64");
+}
+function buildWsUrl(apiKey, apiSecret) {
+	const date = (/* @__PURE__ */ new Date()).toUTCString();
+	const authorization = buildAuthorization(apiKey, apiSecret, date);
+	return {
+		url: `${HOST_URL}?${new URLSearchParams({
+			authorization,
+			date,
+			host: HOST
+		}).toString()}`,
+		date
+	};
+}
+function dataSection(status, pcmChunk) {
+	return {
+		status,
+		format: "audio/L16;rate=16000",
+		audio: pcmChunk.length ? Buffer.from(pcmChunk).toString("base64") : "",
+		encoding: "raw"
+	};
+}
+function frameFirst(appId, pcmChunk) {
+	return {
+		common: { app_id: appId },
+		business: {
+			language: "zh_cn",
+			domain: "iat",
+			accent: "mandarin",
+			dwa: "wpgs"
+		},
+		data: dataSection(FRAME.FIRST, pcmChunk)
+	};
+}
+function frameContinue(pcmChunk) {
+	return { data: dataSection(FRAME.CONTINUE, pcmChunk) };
+}
+function frameLastEmpty() {
+	return { data: dataSection(FRAME.LAST, Buffer.alloc(0)) };
+}
+function mergeResult(slots, res) {
+	const result = res?.data?.result;
+	if (!result) return;
+	const sn = result.sn;
+	slots[sn] = result;
+	if (result.pgs === "rpl" && Array.isArray(result.rg)) for (const idx of result.rg) slots[idx] = null;
+}
+function extractText(slots) {
+	let str = "";
+	for (let i = 0; i < slots.length; i += 1) {
+		const item = slots[i];
+		if (item == null) continue;
+		const ws = item.ws;
+		if (!ws) continue;
+		for (const seg of ws) {
+			const list = seg.cw;
+			if (!list) continue;
+			for (const w of list) if (w?.w) str += w.w;
+		}
+	}
+	return str;
+}
+function chunkPcm(buffer, size = 1280) {
+	const chunks = [];
+	for (let i = 0; i < buffer.length; i += size) chunks.push(buffer.subarray(i, Math.min(i + size, buffer.length)));
+	return chunks;
+}
+/**
+* @param {{ appId: string; apiKey: string; apiSecret: string; pcm: Buffer }} opts - pcm 为 16kHz 16bit 单声道 PCM
+* @returns {Promise<{ text: string; sid?: string }>}
+*/
+function transcribePcm16k(opts) {
+	const { appId, apiKey, apiSecret, pcm } = opts;
+	if (!appId?.trim() || !apiKey?.trim() || !apiSecret?.trim()) return Promise.reject(/* @__PURE__ */ new Error("请先配置讯飞 AppID、API Key、APISecret"));
+	if (!Buffer.isBuffer(pcm) || pcm.length < 320) return Promise.reject(/* @__PURE__ */ new Error("有效 PCM 数据过短"));
+	if (pcm.length % 2 !== 0) return Promise.reject(/* @__PURE__ */ new Error("PCM 长度须为偶数字节（16bit）"));
+	const chunks = chunkPcm(pcm, 1280);
+	const { url } = buildWsUrl(apiKey, apiSecret);
+	return new Promise((resolve, reject) => {
+		const slots = [];
+		let settled = false;
+		let sid = "";
+		const ws = new WebSocket(url);
+		const timer = setTimeout(() => {
+			if (!settled) {
+				settled = true;
+				try {
+					ws.close();
+				} catch {}
+				reject(/* @__PURE__ */ new Error("讯飞听写超时"));
+			}
+		}, 12e4);
+		function finish(err, result) {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try {
+				ws.close();
+			} catch {}
+			if (err) reject(err);
+			else resolve(result);
+		}
+		ws.on("message", (data) => {
+			let res;
+			try {
+				res = JSON.parse(data.toString());
+			} catch {
+				return;
+			}
+			if (res.code !== 0) {
+				finish(new Error(res.message || `讯飞错误码 ${res.code}`));
+				return;
+			}
+			if (res.sid) sid = res.sid;
+			mergeResult(slots, res);
+			if (res.data?.status === 2) finish(null, {
+				text: extractText(slots),
+				sid
+			});
+		});
+		ws.on("error", (err) => {
+			finish(err instanceof Error ? err : new Error(String(err)));
+		});
+		ws.on("close", () => {
+			if (!settled) finish(/* @__PURE__ */ new Error("连接已关闭但未收到结束帧"));
+		});
+		ws.on("open", async () => {
+			try {
+				ws.send(JSON.stringify(frameFirst(appId, chunks[0])));
+				if (chunks.length === 1) {
+					ws.send(JSON.stringify(frameLastEmpty()));
+					return;
+				}
+				for (let i = 1; i < chunks.length; i += 1) {
+					ws.send(JSON.stringify(frameContinue(chunks[i])));
+					await new Promise((r) => setImmediate(r));
+				}
+				ws.send(JSON.stringify(frameLastEmpty()));
+			} catch (err) {
+				finish(err instanceof Error ? err : new Error(String(err)));
+			}
+		});
+	});
+}
+//#endregion
+//#region electron/xfyun/xfyunConfigStore.js
+var FILE = "xfyun.json";
+async function loadXfyunConfig(userDataPath) {
+	try {
+		const raw = await readFile(join(userDataPath, FILE), "utf8");
+		const data = JSON.parse(raw);
+		return {
+			appId: typeof data.appId === "string" ? data.appId : "",
+			apiKey: typeof data.apiKey === "string" ? data.apiKey : "",
+			apiSecret: typeof data.apiSecret === "string" ? data.apiSecret : ""
+		};
+	} catch {
+		return {
+			appId: "",
+			apiKey: "",
+			apiSecret: ""
+		};
+	}
+}
+async function saveXfyunConfig(userDataPath, config) {
+	const payload = {
+		appId: typeof config.appId === "string" ? config.appId : "",
+		apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
+		apiSecret: typeof config.apiSecret === "string" ? config.apiSecret : ""
+	};
+	await writeFile(join(userDataPath, FILE), JSON.stringify(payload, null, 2), "utf8");
+	return payload;
+}
+//#endregion
 //#region electron/main.js
 var currentDir = dirname(fileURLToPath(import.meta.url));
 var isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -492,6 +685,22 @@ app.whenReady().then(() => {
 	ipcMain.handle("llm:get-context", () => llmService.getContext());
 	ipcMain.handle("llm:clear-context", () => llmService.clearContext());
 	ipcMain.handle("llm:set-context-window", (_event, maxMessages) => llmService.setContextWindow(maxMessages));
+	const userDataPath = () => app.getPath("userData");
+	ipcMain.handle("xfyun:get-config", async () => loadXfyunConfig(userDataPath()));
+	ipcMain.handle("xfyun:save-config", async (_event, config = {}) => saveXfyunConfig(userDataPath(), config));
+	ipcMain.handle("xfyun:transcribe-pcm", async (_event, payload) => {
+		const cfg = await loadXfyunConfig(userDataPath());
+		let buf;
+		if (payload instanceof Uint8Array) buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+		else if (payload instanceof ArrayBuffer) buf = Buffer.from(payload);
+		else buf = Buffer.from(payload ?? []);
+		return transcribePcm16k({
+			appId: cfg.appId,
+			apiKey: cfg.apiKey,
+			apiSecret: cfg.apiSecret,
+			pcm: buf
+		});
+	});
 	createWindow();
 	app.on("activate", () => {
 		if (BrowserWindow.getAllWindows().length === 0) createWindow();

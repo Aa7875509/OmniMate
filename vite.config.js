@@ -10,6 +10,14 @@ export default defineConfig({
     electron({
       main: {
         entry: 'electron/main.js',
+        vite: {
+          build: {
+            rollupOptions: {
+              /** 勿打包 ws：其内部 require('events') 在 Rolldown ESM 产物中会触发「无 require」报错 */
+              external: ['ws'],
+            },
+          },
+        },
       },
       preload: {
         input: resolve(import.meta.dirname, 'electron/preload.js'),

@@ -1,8 +1,6 @@
 <script setup>
 import {
   AudioOutlined,
-  HistoryOutlined,
-  MessageOutlined,
   SendOutlined,
   StopOutlined,
 } from '@ant-design/icons-vue';
@@ -11,11 +9,6 @@ import MarkdownIt from 'markdown-it';
 import { nextTick, ref, watch } from 'vue';
 
 const props = defineProps({
-  /** 是否展开左侧实时对话消息列表，默认 false 以字幕为主 */
-  dialogExpanded: {
-    type: Boolean,
-    default: false,
-  },
   messages: {
     type: Array,
     default: () => [],
@@ -28,6 +21,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  voiceListening: {
+    type: Boolean,
+    default: false,
+  },
   canRetry: {
     type: Boolean,
     default: false,
@@ -35,12 +32,10 @@ const props = defineProps({
 });
 
 const emit = defineEmits([
-  'update:dialogExpanded',
   'update:draftMessage',
   'submit-message',
   'stop-message',
   'retry-message',
-  'history-click',
   'voice-click',
 ]);
 
@@ -62,6 +57,18 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(md.render(source));
 }
 
+function isAssistantThinking(item) {
+  if (!props.chatBusy || item?.role !== 'assistant') {
+    return false;
+  }
+  const last = props.messages[props.messages.length - 1];
+  if (item !== last) {
+    return false;
+  }
+  const t = typeof item.text === 'string' ? item.text : '';
+  return !t.trim();
+}
+
 function scrollToBottom() {
   nextTick(() => {
     const el = scrollRef.value;
@@ -81,18 +88,6 @@ watch(
 );
 
 watch(
-  () => props.dialogExpanded,
-  (open) => {
-    if (open) {
-      nextTick(() => {
-        scrollToBottom();
-      });
-    }
-  },
-);
-
-/** 流式结束后再滚一次：列表/Markdown 高度在 chatBusy 置 false 后可能才稳定 */
-watch(
   () => props.chatBusy,
   (busy) => {
     if (busy) {
@@ -108,138 +103,113 @@ watch(
 </script>
 
 <template>
-  <section>
-    <a-button
-      v-if="!dialogExpanded"
-      class="chat-expand-btn"
-      type="default"
-      @click="emit('update:dialogExpanded', true)"
-    >
-      <MessageOutlined />
-      展开对话
-    </a-button>
-    <a-card v-show="dialogExpanded" class="chat-card" :bordered="false">
-      <template #title>
-        <span>实时对话</span>
-      </template>
-      <template #extra>
-        <a-button type="text" size="small" @click="emit('update:dialogExpanded', false)">收起</a-button>
-      </template>
-      <div ref="scrollRef" class="chat-scroll">
+  <section class="chat-dock" aria-label="对话与回复">
+    <a-card class="chat-dock-panel" :bordered="false">
+      <div ref="scrollRef" class="chat-scroll" role="log" aria-live="polite">
         <a-empty v-if="messages.length === 0" class="chat-empty" description="开始一段新对话" />
-        <a-list :data-source="messages" item-layout="vertical" :split="false">
+        <a-list v-else :data-source="messages" item-layout="vertical" :split="false">
           <template #renderItem="{ item }">
             <a-list-item>
               <a-flex :justify="item.role === 'assistant' ? 'start' : 'end'">
                 <div class="bubble" :class="item.role === 'assistant' ? 'assistant-bubble' : 'user-bubble'">
-                  <a-space size="small">
+                  <!-- <a-space size="small">
                     <a-typography-text strong>{{ item.name }}</a-typography-text>
-                  </a-space>
-                  <div class="bubble-markdown" v-html="renderMarkdown(item.text)"></div>
+                  </a-space> -->
+                  <div v-if="isAssistantThinking(item)" class="thinking-placeholder">
+                    思考中…
+                  </div>
+                  <div v-else class="bubble-markdown" v-html="renderMarkdown(item.text)"></div>
                 </div>
               </a-flex>
             </a-list-item>
           </template>
         </a-list>
       </div>
-    </a-card>
 
-    <a-card class="bottom-bar" :bordered="false">
-      <div class="chat-composer">
-        <a-button class="composer-side-btn" shape="circle" aria-label="语音输入" @click="emit('voice-click')">
-          <AudioOutlined />
-        </a-button>
-        <a-input
-          :value="draftMessage"
-          class="composer-input"
-          size="large"
-          placeholder="给 OmniMate 发送消息..."
-          @update:value="emit('update:draftMessage', $event)"
-          @pressEnter="submitByEnter"
-        />
-        <a-button
-          v-if="chatBusy"
-          class="composer-stop-btn"
-          danger
-          shape="circle"
-          aria-label="停止生成"
-          @click="emit('stop-message')"
-        >
-          <StopOutlined />
-        </a-button>
-        <a-button
-          class="composer-send-btn"
-          type="primary"
-          shape="circle"
-          aria-label="发送"
-          :disabled="chatBusy || !draftMessage.trim()"
-          @click="emit('submit-message')"
-        >
-          <SendOutlined />
-        </a-button>
-        <a-button v-if="canRetry" class="composer-retry-btn" type="text" @click="emit('retry-message')">
-          重试上一条
-        </a-button>
-        <a-button class="composer-history-btn" type="text" @click="emit('history-click')">
-          <HistoryOutlined />
-          历史记录
-        </a-button>
+      <div class="composer-wrap">
+        <div class="chat-composer">
+          <a-button
+            class="composer-side-btn"
+            shape="circle"
+            aria-label="语音输入"
+            :class="{ 'is-voice-listening': voiceListening }"
+            :disabled="chatBusy"
+            @click="emit('voice-click')"
+          >
+            <AudioOutlined />
+          </a-button>
+          <a-input
+            :value="draftMessage"
+            class="composer-input"
+            size="large"
+            placeholder="给 OmniMate 发送消息..."
+            @update:value="emit('update:draftMessage', $event)"
+            @pressEnter="submitByEnter"
+          />
+          <a-button
+            v-if="chatBusy"
+            class="composer-stop-btn"
+            danger
+            shape="circle"
+            aria-label="停止生成"
+            @click="emit('stop-message')"
+          >
+            <StopOutlined />
+          </a-button>
+          <a-button
+            class="composer-send-btn"
+            type="primary"
+            shape="circle"
+            aria-label="发送"
+            :disabled="chatBusy || !draftMessage.trim()"
+            @click="emit('submit-message')"
+          >
+            <SendOutlined />
+          </a-button>
+          <a-button v-if="canRetry" class="composer-retry-btn" type="text" @click="emit('retry-message')">
+            重试上一条
+          </a-button>
+        </div>
       </div>
     </a-card>
   </section>
 </template>
 
 <style scoped>
-/* 不设置 position: relative，使绝对定位的卡片相对 .main-content，叠在 3D 区左侧 */
+.chat-dock {
+  flex: 0 0 clamp(300px, 36vw, 420px);
+  min-width: 280px;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 
-.chat-expand-btn {
-  position: absolute;
-  z-index: 3;
-  left: 16px;
-  top: 14px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 36px;
-  padding: 0 12px;
+.chat-dock-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  color: #374151;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: none;
 }
 
-.chat-card {
-  position: absolute;
-  z-index: 3;
-  left: 16px;
-  top: 14px;
-  width: min(360px, calc(100vw - 48px));
-  height: calc(100% - 134px);
-  border: 1px solid #e5e7eb;
-  background: rgba(255, 255, 255, 0.52);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-}
-
-.chat-card :deep(.ant-card-head-title) {
-  color: #111827;
-}
-
-.chat-card :deep(.ant-card-head) {
-  background: transparent;
-}
-
-.chat-card :deep(.ant-card-body) {
-  height: calc(100% - 57px);
+.chat-dock-panel :deep(.ant-card-body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
   background: transparent;
 }
 
 .chat-scroll {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding-right: 6px;
+  padding-right: 4px;
 }
 
 .chat-scroll::-webkit-scrollbar {
@@ -247,7 +217,7 @@ watch(
 }
 
 .chat-scroll::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: rgba(107, 114, 128, 0.35);
   border-radius: 999px;
 }
 
@@ -256,12 +226,12 @@ watch(
 }
 
 .chat-empty :deep(.ant-empty-image) {
-  opacity: 0.9;
+  opacity: 0.85;
   filter: none;
 }
 
 .bubble {
-  max-width: min(72%, 760px);
+  max-width: min(92%, 760px);
   padding: 12px 14px 11px;
   border: 1px solid #e5e7eb;
   border-radius: 14px;
@@ -282,8 +252,25 @@ watch(
   color: #111827;
 }
 
+.thinking-placeholder {
+  color: #6b7280;
+  font-size: 14px;
+  line-height: 1.5;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 .bubble-markdown {
-  margin-top: 8px;
+  /* margin-top: 8px; */
   color: #111827;
 }
 
@@ -300,7 +287,7 @@ watch(
   padding: 10px;
   border-radius: 8px;
   overflow: auto;
-  background: #f3f4f6;
+  background: rgba(243, 244, 246, 0.95);
 }
 
 .bubble-markdown :deep(code) {
@@ -311,11 +298,11 @@ watch(
   color: #1677ff;
 }
 
-.bottom-bar {
-  flex: 0 0 auto;
-  border: 1px solid #e5e7eb;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+.composer-wrap {
+  flex-shrink: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e5e7eb;
 }
 
 .chat-composer {
@@ -329,6 +316,12 @@ watch(
   color: #6b7280;
   background: #ffffff;
   border: 1px solid #d1d5db;
+}
+
+.composer-side-btn.is-voice-listening {
+  color: #ffffff;
+  background: #ef4444;
+  border-color: #dc2626;
 }
 
 .composer-input {
@@ -361,16 +354,17 @@ watch(
   flex: 0 0 auto;
 }
 
-.composer-retry-btn,
-.composer-history-btn {
+.composer-retry-btn {
   color: #6b7280;
 }
 
 @media (max-width: 900px) {
-  .chat-card {
-    position: static;
+  .chat-dock {
+    flex: 0 0 auto;
+    max-width: none;
+    min-width: 0;
     width: 100%;
-    height: 42%;
+    height: min(46vh, 400px);
   }
 }
 </style>

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
@@ -13,16 +13,6 @@ const props = defineProps({
   avatarStatus: {
     type: String,
     default: 'idle',
-  },
-  /** 底部字幕：助手流式/完整回复，与左侧实时对话同数据源 */
-  subtitleText: {
-    type: String,
-    default: '',
-  },
-  /** 口播逐字阶段可为空串，为 true 时仍显示字幕区（与 subtitleText 二选一由父级控制） */
-  subtitleVoiceActive: {
-    type: Boolean,
-    default: false,
   },
 });
 
@@ -383,30 +373,6 @@ defineExpose({
   triggerAvatarAction,
 });
 
-const subtitlePanelVisible = computed(
-  () =>
-    !stageHint.value &&
-    (Boolean(props.subtitleText?.trim()) || props.subtitleVoiceActive),
-);
-
-function scrollSubtitleToBottom() {
-  if (!stageRef.value) {
-    return;
-  }
-  const box = stageRef.value.querySelector('.stage-subtitle');
-  if (!box) {
-    return;
-  }
-  box.scrollTop = box.scrollHeight;
-}
-
-watch(
-  () => [props.subtitleText, props.subtitleVoiceActive],
-  () => {
-    nextTick(() => scrollSubtitleToBottom());
-  },
-);
-
 onBeforeUnmount(() => {
   if (frameId) {
     cancelAnimationFrame(frameId);
@@ -455,16 +421,6 @@ onBeforeUnmount(() => {
       </span>
       <button type="button" class="scale-btn" aria-label="放大模型" @click="changeModelScale(0.1)">+</button>
       <button type="button" class="scale-reset-btn" @click="resetModelScale">重置</button>
-    </div>
-    <div
-      v-if="subtitlePanelVisible"
-      class="stage-subtitle"
-      role="status"
-      aria-live="polite"
-    >
-      <div class="stage-subtitle-text">
-        {{ subtitleText }}
-      </div>
     </div>
     <div v-if="stageHint" class="stage-hint">{{ stageHint }}</div>
   </div>
@@ -527,45 +483,6 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #4b5563;
   text-align: center;
-}
-
-.stage-subtitle {
-  position: absolute;
-  z-index: 2;
-  left: auto;
-  right: 12px;
-  bottom: 12px;
-  max-width: min(380px, calc(100% - 24px));
-  max-height: min(22vh, 200px);
-  padding: 10px 0 10px 12px;
-  text-align: right;
-  overflow-x: hidden;
-  overflow-y: auto;
-  pointer-events: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
-}
-
-.stage-subtitle::-webkit-scrollbar {
-  width: 5px;
-}
-
-.stage-subtitle::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.18);
-  border-radius: 99px;
-}
-
-.stage-subtitle-text {
-  text-align: right;
-  max-width: 100%;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 14px;
-  line-height: 1.6;
-  letter-spacing: 0.03em;
-  color: #111827;
-  font-weight: 400;
 }
 
 .stage-hint {
