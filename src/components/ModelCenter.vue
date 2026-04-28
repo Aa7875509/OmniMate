@@ -47,6 +47,7 @@ const props = defineProps({
       appId: '',
       apiKey: '',
       apiSecret: '',
+      ttsVcn: 'x4_yezi',
     }),
   },
   llmStatus: {
@@ -180,9 +181,9 @@ function updateThemeColor(value) {
         </a-form>
       </a-tab-pane>
 
-      <a-tab-pane key="xfyun" tab="讯飞听写">
+      <a-tab-pane key="xfyun" tab="讯飞语音">
         <a-typography-text type="secondary" style="display: block; margin-bottom: 16px;">
-          在讯飞开放平台创建「语音听写」应用并开通流式听写，填写下方三项；录音结束后由主进程按官方 WebSocket 协议转写并填入输入框。
+          在讯飞开放平台同一应用（或分别开通）「语音听写」与「在线语音合成（流式版）」，填写下方三项：听写用于麦克风转文字；朗读使用相同密钥，由主进程按官方 WebSocket 合成 PCM 并在应用内播放。
         </a-typography-text>
         <a-form layout="vertical">
           <a-form-item label="AppID">
@@ -202,8 +203,15 @@ function updateThemeColor(value) {
           <a-form-item label="API Secret">
             <a-input-password
               :value="xfyunConfig.apiSecret"
-              placeholder="语音听写服务的 API Secret"
+              placeholder="听写 / 在线语音合成服务的 API Secret"
               @update:value="emit('update:xfyunConfig', { ...xfyunConfig, apiSecret: $event })"
+            />
+          </a-form-item>
+          <a-form-item label="发音人（vcn）">
+            <a-input
+              :value="xfyunConfig.ttsVcn"
+              placeholder="如 x4_yezi，以控制台在线语音合成已开通的音色为准"
+              @update:value="emit('update:xfyunConfig', { ...xfyunConfig, ttsVcn: $event })"
             />
           </a-form-item>
           <a-form-item>

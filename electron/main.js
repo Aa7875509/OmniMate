@@ -3,12 +3,15 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LLMService } from './ai/LLMService.js';
 import { transcribePcm16k } from './xfyun/xfyunIat.js';
+import { synthesizePcm16k } from './xfyun/xfyunTts.js';
 import { loadXfyunConfig, saveXfyunConfig } from './xfyun/xfyunConfigStore.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const llmService = new LLMService();
 const streamControllers = new Map();
+/** 当前一路讯飞 TTS 合成，stop / 新请求时 abort */
+let xfyunTtsAbort = null;
 
 // 开发模式使用独立临时目录，避免多次启动时 Electron 缓存目录被占用。
 if (isDev) {
@@ -122,6 +125,33 @@ app.whenReady().then(() => {
       apiSecret: cfg.apiSecret,
       pcm: buf,
     });
+  });
+
+  ipcMain.handle('xfyun:synthesize-tts', async (_event, payload = {}) => {
+    xfyunTtsAbort?.abort();
+    const controller = new AbortController();
+    xfyunTtsAbort = controller;
+    const cfg = await loadXfyunConfig(userDataPath());
+    try {
+      const pcm = await synthesizePcm16k({
+        appId: cfg.appId,
+        apiKey: cfg.apiKey,
+        apiSecret: cfg.apiSecret,
+        vcn: cfg.ttsVcn,
+        text: String(payload.text ?? ''),
+        signal: controller.signal,
+      });
+      return pcm;
+    } finally {
+      if (xfyunTtsAbort === controller) {
+        xfyunTtsAbort = null;
+      }
+    }
+  });
+
+  ipcMain.on('xfyun:tts-cancel', () => {
+    xfyunTtsAbort?.abort();
+    xfyunTtsAbort = null;
   });
 
   createWindow();

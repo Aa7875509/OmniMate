@@ -1,9 +1,85 @@
+/** @type {AudioContext | null} */
+let activePcmAudioContext = null;
+/** @type {AudioBufferSourceNode | null} */
+let activePcmSource = null;
+
+function stopActivePcmPlayback() {
+  try {
+    activePcmSource?.stop();
+  } catch {
+    /* noop */
+  }
+  activePcmSource = null;
+  try {
+    void activePcmAudioContext?.close();
+  } catch {
+    /* noop */
+  }
+  activePcmAudioContext = null;
+}
+
+/**
+ * 播放主进程返回的 16kHz mono s16le PCM
+ * @param {ArrayBuffer | Uint8Array} pcmBytes
+ * @returns {Promise<void>}
+ */
+function playPcm16kMono(pcmBytes) {
+  stopActivePcmPlayback();
+  const ab =
+    pcmBytes instanceof ArrayBuffer
+      ? pcmBytes
+      : pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength);
+  if (ab.byteLength < 2) {
+    return Promise.resolve();
+  }
+  const sampleCount = ab.byteLength >> 1;
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  activePcmAudioContext = ctx;
+  const int16 = new Int16Array(ab, 0, sampleCount);
+  const buffer = ctx.createBuffer(1, sampleCount, 16000);
+  const channel = buffer.getChannelData(0);
+  for (let i = 0; i < sampleCount; i += 1) {
+    channel[i] = int16[i] / 32768;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(ctx.destination);
+  activePcmSource = src;
+  return new Promise((resolve) => {
+    src.onended = () => {
+      stopActivePcmPlayback();
+      resolve();
+    };
+    const start = () => {
+      try {
+        src.start();
+      } catch {
+        stopActivePcmPlayback();
+        resolve();
+      }
+    };
+    if (ctx.state === 'suspended') {
+      void ctx.resume().then(start, () => {
+        stopActivePcmPlayback();
+        resolve();
+      });
+    } else {
+      start();
+    }
+  });
+}
+
+function useXfyunStreamTts() {
+  return Boolean(globalThis.window?.electronAPI?.xfyun?.synthesizeTts);
+}
+
 export function stopBrowserTts() {
   try {
     globalThis.speechSynthesis?.cancel();
   } catch {
     /* noop */
   }
+  stopActivePcmPlayback();
   if (activeSpeechEnd) {
     const end = activeSpeechEnd;
     activeSpeechEnd = null;
@@ -134,6 +210,9 @@ let streamQueue = [];
 let streamSpokenPlainEnd = 0;
 let streamTtsSpeakingActive = false;
 let streamOnSpeakingChange = null;
+let xfyunStreamDrainRunning = false;
+/** 递增以打断正在进行的讯飞朗读循环 */
+let streamTtsGeneration = 0;
 
 function notifyStreamSpeaking(speaking) {
   if (streamTtsSpeakingActive === speaking) {
@@ -214,7 +293,54 @@ function pullNextSegment(pending, flush) {
   return { segment: t, consumed: pending.length };
 }
 
+async function speakNextQueuedXfyun() {
+  if (xfyunStreamDrainRunning) {
+    return;
+  }
+  xfyunStreamDrainRunning = true;
+  const gen = streamTtsGeneration;
+  const api = globalThis.window?.electronAPI?.xfyun;
+  try {
+    while (streamQueue.length > 0 && gen === streamTtsGeneration) {
+      const raw = streamQueue.shift();
+      const text = typeof raw === 'string' ? raw.trim() : '';
+      if (!text) {
+        continue;
+      }
+      notifyStreamSpeaking(true);
+      try {
+        const pcm = await api.synthesizeTts(text);
+        if (gen !== streamTtsGeneration) {
+          break;
+        }
+        await playPcm16kMono(pcm);
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          break;
+        }
+        console.warn('[TTS] 讯飞合成失败', err);
+      }
+    }
+  } finally {
+    xfyunStreamDrainRunning = false;
+    if (streamQueue.length > 0 && gen === streamTtsGeneration && useXfyunStreamTts()) {
+      void speakNextQueuedXfyun();
+    } else if (streamQueue.length === 0) {
+      notifyStreamSpeaking(false);
+    }
+  }
+}
+
 function speakNextQueued() {
+  if (useXfyunStreamTts()) {
+    if (streamQueue.length === 0) {
+      notifyStreamSpeaking(false);
+      return;
+    }
+    void speakNextQueuedXfyun();
+    return;
+  }
+
   const syn = globalThis.speechSynthesis;
   if (typeof globalThis === 'undefined' || !syn?.speak || !globalThis.SpeechSynthesisUtterance) {
     notifyStreamSpeaking(false);
@@ -270,6 +396,13 @@ function speakNextQueued() {
 }
 
 function tryDrainStreamQueue() {
+  if (useXfyunStreamTts()) {
+    if (streamQueue.length === 0 || xfyunStreamDrainRunning) {
+      return;
+    }
+    speakNextQueued();
+    return;
+  }
   const syn = globalThis.speechSynthesis;
   if (!syn?.speak) {
     return;
@@ -297,6 +430,8 @@ function enqueueStreamSegment(segment) {
 export function stopStreamTts() {
   streamQueue = [];
   streamSpokenPlainEnd = 0;
+  streamTtsGeneration += 1;
+  globalThis.window?.electronAPI?.xfyun?.cancelTts?.();
   stopBrowserTts();
   notifyStreamSpeaking(false);
 }
@@ -313,7 +448,10 @@ export function feedStreamTts(fullRawText, options = {}) {
     streamOnSpeakingChange = onSpeakingChange;
   }
 
-  if (typeof globalThis === 'undefined' || !globalThis.speechSynthesis) {
+  if (typeof globalThis === 'undefined') {
+    return;
+  }
+  if (!useXfyunStreamTts() && !globalThis.speechSynthesis) {
     return;
   }
 

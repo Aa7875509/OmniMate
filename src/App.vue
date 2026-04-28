@@ -25,10 +25,12 @@ const DEFAULT_OLLAMA_CONFIG = {
   baseURL: 'http://127.0.0.1:11434',
   model: 'gemma4:e4b',
 };
+const DEFAULT_XFYUN_TTS_VCN = 'x4_yezi';
 const DEFAULT_XFYUN_CONFIG = {
   appId: '',
   apiKey: '',
   apiSecret: '',
+  ttsVcn: DEFAULT_XFYUN_TTS_VCN,
 };
 
 const modelSlot = {
@@ -114,10 +116,12 @@ async function syncXFyunConfig() {
   }
   try {
     const c = await xf.getConfig();
+    const rawVcn = typeof c.ttsVcn === 'string' ? c.ttsVcn.trim() : '';
     xfyunConfig.value = {
       appId: typeof c.appId === 'string' ? c.appId : '',
       apiKey: typeof c.apiKey === 'string' ? c.apiKey : '',
       apiSecret: typeof c.apiSecret === 'string' ? c.apiSecret : '',
+      ttsVcn: rawVcn || DEFAULT_XFYUN_TTS_VCN,
     };
   } catch {
     /* noop */
@@ -201,6 +205,7 @@ async function applyXFyunSettings() {
       appId: String(xfyunConfig.value.appId ?? '').trim(),
       apiKey: String(xfyunConfig.value.apiKey ?? '').trim(),
       apiSecret: String(xfyunConfig.value.apiSecret ?? '').trim(),
+      ttsVcn: String(xfyunConfig.value.ttsVcn ?? '').trim(),
     });
     await syncXFyunConfig();
     llmStatus.value = '讯飞语音听写配置已保存。';

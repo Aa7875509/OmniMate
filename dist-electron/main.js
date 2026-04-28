@@ -425,27 +425,27 @@ var LLMService = class {
 * 讯飞语音听写（流式 WebSocket），鉴权与帧格式见官方 demo：
 * https://www.xfyun.cn/doc/asr/voicedictation/API.html
 */
-var HOST = "iat-api.xfyun.cn";
-var HOST_URL = `wss://${HOST}/v2/iat`;
-var URI = "/v2/iat";
+var HOST$1 = "iat-api.xfyun.cn";
+var HOST_URL$1 = `wss://${HOST$1}/v2/iat`;
+var URI$1 = "/v2/iat";
 var FRAME = {
 	FIRST: 0,
 	CONTINUE: 1,
 	LAST: 2
 };
-function buildAuthorization(apiKey, apiSecret, date) {
-	const signatureOrigin = `host: ${HOST}\ndate: ${date}\nGET ${URI} HTTP/1.1`;
+function buildAuthorization$1(apiKey, apiSecret, date) {
+	const signatureOrigin = `host: ${HOST$1}\ndate: ${date}\nGET ${URI$1} HTTP/1.1`;
 	const authorizationOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${crypto.createHmac("sha256", apiSecret).update(signatureOrigin).digest("base64")}"`;
 	return Buffer.from(authorizationOrigin, "utf8").toString("base64");
 }
-function buildWsUrl(apiKey, apiSecret) {
+function buildWsUrl$1(apiKey, apiSecret) {
 	const date = (/* @__PURE__ */ new Date()).toUTCString();
-	const authorization = buildAuthorization(apiKey, apiSecret, date);
+	const authorization = buildAuthorization$1(apiKey, apiSecret, date);
 	return {
-		url: `${HOST_URL}?${new URLSearchParams({
+		url: `${HOST_URL$1}?${new URLSearchParams({
 			authorization,
 			date,
-			host: HOST
+			host: HOST$1
 		}).toString()}`,
 		date
 	};
@@ -513,7 +513,7 @@ function transcribePcm16k(opts) {
 	if (!Buffer.isBuffer(pcm) || pcm.length < 320) return Promise.reject(/* @__PURE__ */ new Error("有效 PCM 数据过短"));
 	if (pcm.length % 2 !== 0) return Promise.reject(/* @__PURE__ */ new Error("PCM 长度须为偶数字节（16bit）"));
 	const chunks = chunkPcm(pcm, 1280);
-	const { url } = buildWsUrl(apiKey, apiSecret);
+	const { url } = buildWsUrl$1(apiKey, apiSecret);
 	return new Promise((resolve, reject) => {
 		const slots = [];
 		let settled = false;
@@ -581,6 +581,129 @@ function transcribePcm16k(opts) {
 	});
 }
 //#endregion
+//#region electron/xfyun/xfyunTts.js
+/**
+* 讯飞在线语音合成（流式版 WebSocket），鉴权与帧格式见官方 demo：
+* https://www.xfyun.cn/doc/tts/online_tts/API.html
+*/
+var HOST = "tts-api.xfyun.cn";
+var HOST_URL = `wss://${HOST}/v2/tts`;
+var URI = "/v2/tts";
+/** 未在配置中填写发音人时的默认 vcn（须与控制台已开通音色一致） */
+var DEFAULT_TTS_VCN = "x4_yezi";
+var DEFAULT_BUSINESS = {
+	aue: "raw",
+	auf: "audio/L16;rate=16000",
+	vcn: DEFAULT_TTS_VCN,
+	tte: "UTF8"
+};
+function buildAuthorization(apiKey, apiSecret, date) {
+	const signatureOrigin = `host: ${HOST}\ndate: ${date}\nGET ${URI} HTTP/1.1`;
+	const authorizationOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${crypto.createHmac("sha256", apiSecret).update(signatureOrigin).digest("base64")}"`;
+	return Buffer.from(authorizationOrigin, "utf8").toString("base64");
+}
+function buildWsUrl(apiKey, apiSecret) {
+	const date = (/* @__PURE__ */ new Date()).toUTCString();
+	const authorization = buildAuthorization(apiKey, apiSecret, date);
+	return `${HOST_URL}?${new URLSearchParams({
+		authorization,
+		date,
+		host: HOST
+	}).toString()}`;
+}
+/**
+* @param {{ appId: string; apiKey: string; apiSecret: string; text: string; vcn?: string; signal?: AbortSignal }} opts
+* @returns {Promise<Buffer>} 拼接后的 PCM（16kHz 16bit mono）
+*/
+function synthesizePcm16k(opts) {
+	const { appId, apiKey, apiSecret, text, vcn, signal } = opts;
+	const vcnResolved = typeof vcn === "string" && vcn.trim() ? vcn.trim() : DEFAULT_TTS_VCN;
+	const plain = typeof text === "string" ? text.trim() : "";
+	if (!appId?.trim() || !apiKey?.trim() || !apiSecret?.trim()) return Promise.reject(/* @__PURE__ */ new Error("请先配置讯飞 AppID、API Key、APISecret"));
+	if (!plain) return Promise.reject(/* @__PURE__ */ new Error("合成文本为空"));
+	const url = buildWsUrl(apiKey, apiSecret);
+	return new Promise((resolve, reject) => {
+		const chunks = [];
+		let settled = false;
+		let ws;
+		const timer = setTimeout(() => {
+			if (!settled) {
+				settled = true;
+				try {
+					ws?.close();
+				} catch {}
+				reject(/* @__PURE__ */ new Error("讯飞语音合成超时"));
+			}
+		}, 12e4);
+		let onAbort = null;
+		function finish(err, buf) {
+			if (settled) return;
+			settled = true;
+			if (signal && onAbort) {
+				signal.removeEventListener("abort", onAbort);
+				onAbort = null;
+			}
+			clearTimeout(timer);
+			try {
+				ws?.close();
+			} catch {}
+			if (err) reject(err);
+			else resolve(buf ?? Buffer.alloc(0));
+		}
+		if (signal) {
+			if (signal.aborted) {
+				finish(Object.assign(/* @__PURE__ */ new Error("aborted"), { name: "AbortError" }));
+				return;
+			}
+			onAbort = () => {
+				finish(Object.assign(/* @__PURE__ */ new Error("aborted"), { name: "AbortError" }));
+			};
+			signal.addEventListener("abort", onAbort);
+		}
+		ws = new WebSocket(url);
+		ws.on("message", (data) => {
+			let res;
+			try {
+				res = JSON.parse(data.toString());
+			} catch {
+				return;
+			}
+			if (res.code !== 0) {
+				finish(new Error(res.message || `讯飞错误码 ${res.code}`));
+				return;
+			}
+			const audioB64 = res.data?.audio;
+			if (audioB64) chunks.push(Buffer.from(audioB64, "base64"));
+			if (res.data?.status === 2) finish(null, Buffer.concat(chunks));
+		});
+		ws.on("error", (err) => {
+			finish(err instanceof Error ? err : new Error(String(err)));
+		});
+		ws.on("close", () => {
+			if (!settled) finish(/* @__PURE__ */ new Error("连接已关闭但未收到结束帧"));
+		});
+		ws.on("open", () => {
+			if (settled) return;
+			const frame = {
+				common: { app_id: appId.trim() },
+				business: {
+					...DEFAULT_BUSINESS,
+					vcn: vcnResolved
+				},
+				data: {
+					text: Buffer.from(plain, "utf8").toString("base64"),
+					status: 2
+				}
+			};
+			try {
+				ws.send(JSON.stringify(frame));
+			} catch (err) {
+				finish(err instanceof Error ? err : new Error(String(err)));
+			}
+		});
+	});
+}
+//#endregion
 //#region electron/xfyun/xfyunConfigStore.js
 var FILE = "xfyun.json";
 async function loadXfyunConfig(userDataPath) {
@@ -590,13 +713,15 @@ async function loadXfyunConfig(userDataPath) {
 		return {
 			appId: typeof data.appId === "string" ? data.appId : "",
 			apiKey: typeof data.apiKey === "string" ? data.apiKey : "",
-			apiSecret: typeof data.apiSecret === "string" ? data.apiSecret : ""
+			apiSecret: typeof data.apiSecret === "string" ? data.apiSecret : "",
+			ttsVcn: typeof data.ttsVcn === "string" ? data.ttsVcn : ""
 		};
 	} catch {
 		return {
 			appId: "",
 			apiKey: "",
-			apiSecret: ""
+			apiSecret: "",
+			ttsVcn: ""
 		};
 	}
 }
@@ -604,7 +729,8 @@ async function saveXfyunConfig(userDataPath, config) {
 	const payload = {
 		appId: typeof config.appId === "string" ? config.appId : "",
 		apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
-		apiSecret: typeof config.apiSecret === "string" ? config.apiSecret : ""
+		apiSecret: typeof config.apiSecret === "string" ? config.apiSecret : "",
+		ttsVcn: typeof config.ttsVcn === "string" ? config.ttsVcn.trim() : ""
 	};
 	await writeFile(join(userDataPath, FILE), JSON.stringify(payload, null, 2), "utf8");
 	return payload;
@@ -615,6 +741,8 @@ var currentDir = dirname(fileURLToPath(import.meta.url));
 var isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 var llmService = new LLMService();
 var streamControllers = /* @__PURE__ */ new Map();
+/** 当前一路讯飞 TTS 合成，stop / 新请求时 abort */
+var xfyunTtsAbort = null;
 if (isDev) app.setPath("userData", join(app.getPath("temp"), "omni-mate-dev"));
 function createWindow() {
 	const mainWindow = new BrowserWindow({
@@ -700,6 +828,28 @@ app.whenReady().then(() => {
 			apiSecret: cfg.apiSecret,
 			pcm: buf
 		});
+	});
+	ipcMain.handle("xfyun:synthesize-tts", async (_event, payload = {}) => {
+		xfyunTtsAbort?.abort();
+		const controller = new AbortController();
+		xfyunTtsAbort = controller;
+		const cfg = await loadXfyunConfig(userDataPath());
+		try {
+			return await synthesizePcm16k({
+				appId: cfg.appId,
+				apiKey: cfg.apiKey,
+				apiSecret: cfg.apiSecret,
+				vcn: cfg.ttsVcn,
+				text: String(payload.text ?? ""),
+				signal: controller.signal
+			});
+		} finally {
+			if (xfyunTtsAbort === controller) xfyunTtsAbort = null;
+		}
+	});
+	ipcMain.on("xfyun:tts-cancel", () => {
+		xfyunTtsAbort?.abort();
+		xfyunTtsAbort = null;
 	});
 	createWindow();
 	app.on("activate", () => {

@@ -74,7 +74,9 @@ var electronAPI = {
 	xfyun: {
 		getConfig: () => electron.ipcRenderer.invoke("xfyun:get-config"),
 		saveConfig: (config = {}) => electron.ipcRenderer.invoke("xfyun:save-config", cloneForIpc(config)),
-		transcribePcm: (pcm) => electron.ipcRenderer.invoke("xfyun:transcribe-pcm", pcm)
+		transcribePcm: (pcm) => electron.ipcRenderer.invoke("xfyun:transcribe-pcm", pcm),
+		synthesizeTts: (text) => electron.ipcRenderer.invoke("xfyun:synthesize-tts", { text }),
+		cancelTts: () => electron.ipcRenderer.send("xfyun:tts-cancel")
 	}
 };
 electron.contextBridge.exposeInMainWorld("electronAPI", electronAPI);

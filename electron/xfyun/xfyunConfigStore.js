@@ -11,9 +11,10 @@ export async function loadXfyunConfig(userDataPath) {
       appId: typeof data.appId === 'string' ? data.appId : '',
       apiKey: typeof data.apiKey === 'string' ? data.apiKey : '',
       apiSecret: typeof data.apiSecret === 'string' ? data.apiSecret : '',
+      ttsVcn: typeof data.ttsVcn === 'string' ? data.ttsVcn : '',
     };
   } catch {
-    return { appId: '', apiKey: '', apiSecret: '' };
+    return { appId: '', apiKey: '', apiSecret: '', ttsVcn: '' };
   }
 }
 
@@ -22,6 +23,7 @@ export async function saveXfyunConfig(userDataPath, config) {
     appId: typeof config.appId === 'string' ? config.appId : '',
     apiKey: typeof config.apiKey === 'string' ? config.apiKey : '',
     apiSecret: typeof config.apiSecret === 'string' ? config.apiSecret : '',
+    ttsVcn: typeof config.ttsVcn === 'string' ? config.ttsVcn.trim() : '',
   };
   await writeFile(join(userDataPath, FILE), JSON.stringify(payload, null, 2), 'utf8');
   return payload;

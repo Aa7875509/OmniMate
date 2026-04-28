@@ -89,6 +89,8 @@ const electronAPI = {
     getConfig: () => ipcRenderer.invoke('xfyun:get-config'),
     saveConfig: (config = {}) => ipcRenderer.invoke('xfyun:save-config', cloneForIpc(config)),
     transcribePcm: (pcm) => ipcRenderer.invoke('xfyun:transcribe-pcm', pcm),
+    synthesizeTts: (text) => ipcRenderer.invoke('xfyun:synthesize-tts', { text }),
+    cancelTts: () => ipcRenderer.send('xfyun:tts-cancel'),
   },
 };
 
